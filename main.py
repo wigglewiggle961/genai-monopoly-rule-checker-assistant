@@ -27,6 +27,7 @@ while True:
             "documents": [],
             "generation": "",
             "verification_decision": "",
+            "retry_count":0
         }
         response = chain.invoke(initial_state)
         answer = response.get("generation", "")

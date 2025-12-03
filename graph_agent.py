@@ -11,6 +11,8 @@ from langgraph.graph import END, StateGraph
 
 load_dotenv()
 
+MAX_RETRIES = 3
+
 def format_docs(docs: List[Document]) -> str:
     # Joins the page content of retrieved documents into a single string.
     return "\n\n".join(doc.page_content for doc in docs)
@@ -24,6 +26,7 @@ class GraphState(TypedDict):
     documents: List[Document]
     generation: str  # answer from first agent
     verification_decision: str  
+    retry_count: int
 
 # nodes
 def retrieve_documents(state: GraphState) -> GraphState:
@@ -40,6 +43,8 @@ def generate_answer(state: GraphState) -> GraphState:
     question = state["question"]
     documents = state["documents"]
 
+    current_retries = state.get("retry_count", 0)
+
     context = format_docs(documents)
     sources = ", ".join(get_sources(documents))
     
@@ -50,7 +55,7 @@ def generate_answer(state: GraphState) -> GraphState:
     })
     
     generation = llm.invoke(prompt_with_inputs)
-    return {"generation": generation.content}
+    return {"generation": generation.content, "retry_count":current_retries+1}
 
 def verify_answer(state: GraphState) -> GraphState:
     # verifies the initial answer, because i got different edition of monopoly and there might
@@ -85,7 +90,12 @@ def decide_next_step(state: GraphState) -> str:
     elif state["verification_decision"] == "RECLARIFICATION":
         return "present_reclarification_question"
     else:
-        return "rethink"
+        if state["retry_count"] < MAX_RETRIES:
+            print(f"Retrying... (Attempt {state['retry_count']}/{MAX_RETRIES})")
+            return "rethink" # Loop back
+        else:
+            print("Max retries reached. Returning what we have.")
+            return "present_final_answer" # Give up and return the ambiguous answer
 
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
