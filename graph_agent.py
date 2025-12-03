@@ -14,12 +14,51 @@ load_dotenv()
 MAX_RETRIES = 3
 
 def format_docs(docs: List[Document]) -> str:
-    # Joins the page content of retrieved documents into a single string.
-    return "\n\n".join(doc.page_content for doc in docs)
+    formatted_chunks = []
+    for doc in docs:
+        source = doc.metadata.get("source", "Unknown")
+        meta = doc.metadata
+        
+        if "start_time" in meta:
+            location = f"Timestamp {format_timestamp(meta['start_time'])}"
+        elif "page" in meta:
+            location = f"Page {meta['page'] + 1}"
+        else:
+            location = "Text segment"
+
+        chunk_text = f"--- Source: {source} ({location}) ---\n{doc.page_content}"
+        formatted_chunks.append(chunk_text)
+        
+    return "\n\n".join(formatted_chunks)
+
+def format_timestamp(seconds):
+    if seconds is None: return ""
+    m, s = divmod(int(seconds),60)
+    return f"{m:02d}:{s:02d}"
 
 def get_sources(docs: List[Document]) -> List[str]:
-    """Extracts the 'source' metadata from a list of documents and returns a unique list."""
-    return sorted(list(set(doc.metadata.get("source", "Unknown Source") for doc in docs)))
+    unique_sources = set()
+    for doc in docs:
+        source = doc.metadata.get("source", "Unknown Source")
+        meta = doc.metadata
+        
+        # Check if it's a video chunk (has start_time)
+        if "start_time" in meta:
+            timestamp = format_timestamp(meta["start_time"])
+            entry = f"{source} (Timestamp: {timestamp})"
+            
+        # Check if it has a page number (Standard PDF Loaders)
+        elif "page" in meta:
+            # +1 because computer counts from 0, humans count from 1
+            entry = f"{source} (Page: {meta['page'] + 1})"
+            
+        # Fallback for Markdown/Text files without specific location data
+        else:
+            entry = source
+            
+        unique_sources.add(entry)
+    
+    return sorted(list(unique_sources))
 
 class GraphState(TypedDict):
     question: str
@@ -85,6 +124,7 @@ def verify_answer(state: GraphState) -> GraphState:
 
 def decide_next_step(state: GraphState) -> str:
     print("Checking verification...")
+    print(state["verification_decision"])
     if state["verification_decision"] == "CORRECT":
         return "present_final_answer"
     elif state["verification_decision"] == "RECLARIFICATION":
@@ -140,29 +180,29 @@ rag_prompt = PromptTemplate(
 
 #using context here instead of sources because I think it should verify based on the given context?
 verifier_prompt_template = """
-You are a strict fact-checker. Review the **User Question**, **Sources**, *Source Context*, and the **Generated Answer**.
+You are a logic gate. Your job is to classify the **Generated Answer**.
 
-Your Rules:
-1. If the Generated Answer is a clarifying question → respond **RECLARIFICATION**.
-2. If the answer is unsupported, unclear, or ambiguous with respect to the sources → respond **AMBIGUOUS**.
-3. If the answer is fully supported and unambiguous → respond **CORRECT**.
+**Instructions (Follow in Order):**
 
-Return ONLY one word.
+1. **CHECK FOR CLARIFICATION:** Does the 'Generated Answer' ask the user a question, ask for specifics, or request which version of the game they are playing?
+   * If YES -> Output **RECLARIFICATION** and STOP.
+   * If NO -> Proceed to step 2.
 
-User Question:
-{question}
+2. **CHECK FOR AMBIGUITY/ERRORS:**
+   Compare the 'Generated Answer' against the 'Sources'.
+   * If the answer contradicts the sources, or if the sources provide conflicting info that the answer fails to address -> Output **AMBIGUOUS**.
+   * If the answer is unsupported by the text -> Output **AMBIGUOUS**.
 
-Sources:
-{sources}
+3. **CHECK FOR CORRECTNESS:**
+   * If the answer is a statement that is fully supported by the sources -> Output **CORRECT**.
 
-Source Context:
-{context}
+**Data:**
+Generated Answer: {generation}
+Sources: {sources}
+Source Context: {context}
+User Question: {question}
 
-Generated Answer:
-{generation}
-
-Your Decision:
-
+**Output (one word only):**
 """
 verifier_prompt = PromptTemplate(
     template=verifier_prompt_template, 
