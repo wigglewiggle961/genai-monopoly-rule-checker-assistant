@@ -1,44 +1,34 @@
 import time
-# from langchain_community.document_loaders import PyMuPDFLoader
 import pymupdf4llm
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter, MarkdownTextSplitter
-# from langchain_community.vectorstores import Chroma
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_core.documents import Document
-# import whisper
 from faster_whisper import WhisperModel 
 import os
+import sys
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
+
 load_dotenv()
 
-## Maybe we can do summarization of chunks in the future
+# --- SETUP ---
+DATA_PATH = "./data"
+DEBUG_PATH = "converted_markdown"
+BATCH_SIZE = 100 
 
-all_docs = []
+if not os.path.exists(DEBUG_PATH):
+    os.makedirs(DEBUG_PATH)
 
-path = "./data"
+# Initialize Models
+# Force CPU for whisper on Windows to avoid DLL issues
+whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+embedding_model = OllamaEmbeddings(model="nomic-embed-text")
 
-debug_path = "converted_markdown"
-
-model = WhisperModel("small")
-
-embedding_model = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-
-db = Chroma(
-    persist_directory="vector_store",
-    embedding_function=embedding_model
-)
-
-# it was sending too much request at the same time
-BATCH_SIZE = 50
-DELAY_SECONDS = 60
-
-def load_vid_with_timestamps(path, filename):
-    segments, info = model.transcribe(path)
+def load_vid_with_timestamps(file_path, filename):
+    segments, info = whisper_model.transcribe(file_path)
     docs = []
     for seg in segments:
-        # Create a document for every segment
         doc = Document(
             page_content=seg.text,
             metadata={
@@ -50,110 +40,94 @@ def load_vid_with_timestamps(path, filename):
         docs.append(doc)
     return docs
 
-def load_pdf_as_markdown(file_path):
-    # apprently this converts the PDF to a markdown string and preserves tables and headers
-    md_text = pymupdf4llm.to_markdown(file_path) 
-    
-    return [Document(page_content=md_text, metadata={"source": file_path})]
-
-def load_vid(path):
-    segments,info=model.transcribe(path)
-    text = " ".join([seg.text for seg in segments])
-    return text
-
-def markdown_split(documents, size=1000, overlap=200):
-    splitter = MarkdownTextSplitter(
+def fixed_size_split(documents, size=256, overlap=50):
+    splitter = CharacterTextSplitter(
+        separator="", 
         chunk_size=size, 
-        chunk_overlap=overlap
+        chunk_overlap=overlap,
+        is_separator_regex=False
     )
     return splitter.split_documents(documents)
 
-def file_already_indexed(db, filename: str):
-    results = db.get(where={"source": filename})
-    return len(results["ids"]) > 0
-
-for filename in os.listdir(path):
-
-    file_path = os.path.join(path, filename)
-
-    # Skip if vectorized already
-    if file_already_indexed(db, filename):
-        print(f"Skipping {filename}, already embedded.")
-        continue
-
-    if filename.lower().endswith(".pdf"):
-        md_text = pymupdf4llm.to_markdown(file_path)
-
-        md_filename = os.path.splitext(filename)[0] + ".md"
-        save_path = os.path.join(debug_path, md_filename)
-        
-        with open(save_path, "w", encoding="utf-8") as f:
-            f.write(md_text)
-            
-        print(f"   -> Saved debug file to: {save_path}")
-
-        docs = [Document(page_content=md_text, metadata={"source": filename})]
-        splitter = MarkdownTextSplitter(chunk_size=1000, chunk_overlap=200)
-        file_chunks = splitter.split_documents(docs)
-        
-        all_docs.extend(file_chunks)
-        
-
-    elif filename.lower().endswith((".webm", ".mp4")):
-        transcript_docs = load_vid_with_timestamps(file_path, filename)
-        vid_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        file_chunks = vid_splitter.split_documents(transcript_docs)
-        all_docs.extend(file_chunks)
-
-
-print("Choose chunking strategy:")
-print("1. Fixed Size")
-print("2. Recursive Character Splitter")
-print("3. Semantic Chunking")
-
-choice = input("")
-
-def fixed_size(documents, size=1000, overlap=100):
-    splitter = CharacterTextSplitter(chunk_size=size, chunk_overlap=overlap)
-    return splitter.split_documents(documents)
-
-def recursive_split(documents, size = 1000, overlap=100):
+def recursive_split(documents, size=256, overlap=50):
     splitter = RecursiveCharacterTextSplitter(chunk_size=size, chunk_overlap=overlap)
     return splitter.split_documents(documents)
 
 def semantic_split(documents):
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-    splitter = SemanticChunker(embeddings)
-    return splitter.split_documents(documents)
+    # Safety: pre-split into 5000-char chunks so SemanticChunker doesn't 
+    # accidentally create a chunk larger than our 8k token context window.
+    pre_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
+    docs = pre_splitter.split_documents(documents)
+    
+    splitter = SemanticChunker(embedding_model)
+    return splitter.split_documents(docs)
 
-if choice == "1":
-    print("fixed")
-    chunks = fixed_size(all_docs)
+def main():
+    # --- 1. LOADING PHASE (The expensive part) ---
+    # We do this once and keep the full documents in memory
+    print("\n--- PHASE 1: LOADING & TRANSCRIBING ---")
+    base_documents = []
+    
+    if not os.path.exists(DATA_PATH):
+        print(f"Error: {DATA_PATH} not found.")
+        return
 
-elif choice == "2":
-    print("recursive")
-    chunks = recursive_split(all_docs)
-
-elif choice == "3":
-    print("semantic")
-    chunks = semantic_split(all_docs)
-
-else:
-    raise ValueError("Invalid selection!")
-
-print(f"Generated {len(chunks)} chunks.")
-
-
-if len(chunks)!=0:
-    for i in range(0, len(chunks), BATCH_SIZE):
-        batch = chunks[i:i + BATCH_SIZE]
+    for filename in os.listdir(DATA_PATH):
+        file_path = os.path.join(DATA_PATH, filename)
         
-        print(f"Processing batch {i // BATCH_SIZE + 1}: adding {len(batch)} chunks...")
-        
-        db.add_documents(documents=batch)
-        
-        print(f"Waiting for {DELAY_SECONDS} seconds...")
-        time.sleep(DELAY_SECONDS)
+        if filename.lower().endswith(".pdf"):
+            print(f"Loading PDF: {filename}...")
+            md_text = pymupdf4llm.to_markdown(file_path)
+            if md_text.strip():
+                base_documents.append(Document(page_content=md_text, metadata={"source": filename}))
 
-else:
-    print("No new files detected")
+        elif filename.lower().endswith((".webm", ".mp4")):
+            print(f"Transcribing Video: {filename} (this might take a while)...")
+            transcript_docs = load_vid_with_timestamps(file_path, filename)
+            base_documents.extend(transcript_docs)
+
+    if not base_documents:
+        print("No documents found to process.")
+        return
+
+    # --- 2. VECTORIZING PHASE (The fast part) ---
+    strategies = {
+        "1": ("standard", fixed_size_split),
+        "2": ("recursive", recursive_split),
+        "3": ("semantic", semantic_split)
+    }
+
+    # If the user provided a specific strategy in CLI, only do that one
+    # Otherwise, do all three by default for the benchmark
+    to_run = [sys.argv[1]] if len(sys.argv) > 1 else ["1", "2", "3"]
+
+    for choice in to_run:
+        if choice not in strategies:
+            print(f"Skipping invalid strategy choice: {choice}")
+            continue
+
+        name, split_func = strategies[choice]
+        db_path = f"vector_store_{name}"
+        
+        print(f"\n--- PHASE 2: PROCESSING STRATEGY [{name.upper()}] ---")
+        print(f"Chunking...")
+        chunks = split_func(base_documents)
+        print(f"Generated {len(chunks)} chunks.")
+
+        print(f"Creating vector store at: {db_path}...")
+        db = Chroma(persist_directory=db_path, embedding_function=embedding_model)
+        
+        for i in range(0, len(chunks), BATCH_SIZE):
+            batch = chunks[i:i + BATCH_SIZE]
+            for doc in batch:
+                if not doc.page_content.startswith("search_document: "):
+                    doc.page_content = f"search_document: {doc.page_content}"
+            
+            print(f"   Adding batch {i // BATCH_SIZE + 1}/{ (len(chunks) // BATCH_SIZE) + 1}...")
+            db.add_documents(documents=batch)
+        print(f"Done with {name}!")
+
+    print("\nAll tasks completed successfully!")
+
+if __name__ == "__main__":
+    main()

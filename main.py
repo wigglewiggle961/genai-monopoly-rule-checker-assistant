@@ -38,6 +38,8 @@ else:
 print("Monopoly Rule Assistant is ready!")
 print("Ask a question or type 'exit' to quit.")
 
+chat_history = []  # rolling history for the Query Rewriter
+
 while True:
     user_query = input("Your question: ")
     if user_query.lower() == 'exit':
@@ -48,15 +50,21 @@ while True:
     if choice == "2":
         initial_state = {
             "question": user_query,
+            "rewritten_question": "",
+            "chat_history": chat_history,
             "documents": [],
             "generation": "",
             "verification_decision": "",
-            "retry_count":0
+            "retry_count": 0
         }
         response = chain.invoke(initial_state)
         answer = response.get("generation", "")
         raw_docs = response.get("documents", [])
         sources_list = [format_source(doc) for doc in raw_docs]
+        # Update history with this turn
+        if answer:
+            chat_history.append(f"User: {user_query}")
+            chat_history.append(f"Assistant: {answer}")
     else:
         response = chain.invoke(user_query)
         answer = response['answer']
