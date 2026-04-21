@@ -11,7 +11,7 @@ A GenAI-powered assistant designed to navigate the complexities of Monopoly rule
 - ** Multi-modal Ingestion**: Seamlessly processes PDF rulebooks and transcribes video tutorials (using Faster-Whisper).
 - ** Advanced Chunking**: Supports Multiple strategies—Fixed-size, Recursive, and Semantic chunking—to optimize context relevance.
 - ** Fully Local**: Powered by **Ollama**, ensuring data privacy and offline capability with models like `llama3.1` and `nomic-embed-text`.
-- ** Performance Benchmarking**: Built-in evaluation scripts to compare chunking strategies and RAG accuracy.
+- ** Performance Benchmarking**: Built-in evaluation scripts utilizing **RAGAS Framework** (Faithfulness, Answer Relevancy, Context Precision) to empirically compare chunking strategies and RAG accuracy.
 
 ---
 
@@ -24,7 +24,7 @@ A GenAI-powered assistant designed to navigate the complexities of Monopoly rule
 
 ### RAG Workflows
 - **Simple RAG**: A streamlined pipeline: Retrieve -> Re-rank (Flashrank) -> Generate.
-- **Agentic RAG**: A sophisticated LangGraph-based flow: Router -> Rewriter -> Retriever -> Generator -> Verifier (with automated retries).
+- **Agentic RAG**: A sophisticated LangGraph-based flow: Router -> Rewriter -> Retriever (with Flashrank Re-ranking) -> Generator -> Verifier (with automated retries).
 
 ---
 
@@ -72,7 +72,7 @@ python main.py
 Select between **Simple RAG** or **Agentic RAG** and start asking questions!
 
 ### 3. Run Evaluations
-Compare the effectiveness of different chunking strategies:
+Compare the effectiveness of different chunking strategies using the Ragas evaluation framework:
 ```bash
 python run_eval.py
 ```
